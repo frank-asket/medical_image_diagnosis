@@ -4,3 +4,6 @@ opencv-python-headless>=4.8.0
 Pillow>=10.0.0
 numpy>=1.24.0
 pydicom>=2.4.0
+fastapi>=0.112.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medical Image Diagnosis UI</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f7f8fa; color: #111; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    h1 { margin-top: 0; }
+    label { display: block; margin-bottom: 8px; font-weight: 600; }
+    input, select, textarea, button { width: 100%; margin-bottom: 12px; padding: 8px; box-sizing: border-box; }
+    button { cursor: pointer; background: #1f6feb; color: #fff; border: none; border-radius: 6px; }
+    button:hover { background: #195ecb; }
+    pre { background: #0d1117; color: #d2e0ff; padding: 12px; border-radius: 6px; overflow-x: auto; max-height: 420px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .muted { color: #555; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Medical Image Diagnosis</h1>
+  <p class="muted">Upload an image to run diagnosis, then ask expert follow-up questions from the same result bundle.</p>
+
+  <div class="card">
+    <h2>1) Upload and Diagnose</h2>
+    <form id="diagnose-form">
+      <label for="image">Medical Image</label>
+      <input id="image" name="image" type="file" accept="image/*,.dcm" required />
+
+      <label for="domain">Domain</label>
+      <select id="domain" name="domain">
+        <option value="auto">Auto</option>
+        <option value="radiology">Radiology</option>
+        <option value="dermatology">Dermatology</option>
+        <option value="ophthalmology">Ophthalmology</option>
+      </select>
+
+      <label for="patient-context">Patient Context (optional)</label>
+      <textarea id="patient-context" name="patient_context" rows="3" placeholder="Optional context for recommendations"></textarea>
+
+      <button type="submit">Run Diagnosis</button>
+    </form>
+    <div id="diagnose-status" class="muted"></div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h2>2) Diagnosis Results</h2>
+      <pre id="results">{}</pre>
+    </div>
+    <div class="card">
+      <h2>3) Expert Q&A</h2>
+      <form id="qa-form">
+        <label for="question">Question</label>
+        <textarea id="question" rows="4" placeholder="Ask a follow-up question..." required></textarea>
+        <button type="submit">Ask Question</button>
+      </form>
+      <div id="qa-status" class="muted"></div>
+      <pre id="qa-result">{}</pre>
+    </div>
+  </div>
+
+  <script>
+    let currentBundleId = null;
+    const diagnoseForm = document.getElementById("diagnose-form");
+    const qaForm = document.getElementById("qa-form");
+    const diagnoseStatus = document.getElementById("diagnose-status");
+    const qaStatus = document.getElementById("qa-status");
+    const resultsPre = document.getElementById("results");
+    const qaPre = document.getElementById("qa-result");
+
+    diagnoseForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      diagnoseStatus.textContent = "Running diagnosis...";
+      qaStatus.textContent = "";
+      qaPre.textContent = "{}";
+      const formData = new FormData(diagnoseForm);
+      try {
+        const response = await fetch("/api/diagnose", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Diagnosis failed");
+        currentBundleId = data.bundle_id;
+        resultsPre.textContent = JSON.stringify(data.result, null, 2);
+        diagnoseStatus.textContent = "Diagnosis complete. You can now ask follow-up questions.";
+      } catch (err) {
+        diagnoseStatus.textContent = "Error: " + err.message;
+      }
+    });
+
+    qaForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!currentBundleId) {
+        qaStatus.textContent = "Run a diagnosis first.";
+        return;
+      }
+      const question = document.getElementById("question").value.trim();
+      if (!question) {
+        qaStatus.textContent = "Question is required.";
+        return;
+      }
+      qaStatus.textContent = "Querying expert assistant...";
+      const formData = new FormData();
+      formData.append("bundle_id", currentBundleId);
+      formData.append("question", question);
+      try {
+        const response = await fetch("/api/qa", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Q&A failed");
+        qaPre.textContent = JSON.stringify(data.clinical_qa, null, 2);
+        qaStatus.textContent = "Answer received.";
+      } catch (err) {
+        qaStatus.textContent = "Error: " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
