@@ -12,6 +12,7 @@ from medical_diagnosis.agents import (
     OphthalmologyAgent,
     RadiologyAgent,
 )
+from medical_diagnosis.adapters import ClinicalDomain, DomainModelAdapter, HeuristicAdapter
 from medical_diagnosis.model_management import ModelRegistry
 from medical_diagnosis.preprocessing import ImagePreprocessor, PreprocessedImage
 from medical_diagnosis.reporting import DiagnosticNarrativeService
@@ -19,7 +20,6 @@ from medical_diagnosis.security import content_fingerprint, enforce_image_size, 
 
 logger = logging.getLogger(__name__)
 
-ClinicalDomain = Literal["radiology", "dermatology", "ophthalmology"]
 RunMode = Literal["auto"] | ClinicalDomain
 
 
@@ -40,6 +40,7 @@ class MedicalDiagnosisOrchestrator:
         *,
         registry: ModelRegistry | None = None,
         apply_clahe: bool = False,
+        adapters: dict[ClinicalDomain, DomainModelAdapter] | None = None,
     ) -> None:
         self.registry = registry or ModelRegistry()
         self.apply_clahe = apply_clahe
@@ -48,6 +49,11 @@ class MedicalDiagnosisOrchestrator:
         self._dermatology = DermatologyAgent(registry=self.registry)
         self._ophthalmology = OphthalmologyAgent(registry=self.registry)
         self._narratives = DiagnosticNarrativeService(registry=self.registry)
+        self._adapters: dict[ClinicalDomain, DomainModelAdapter] = adapters or {
+            "radiology": HeuristicAdapter("radiology"),
+            "dermatology": HeuristicAdapter("dermatology"),
+            "ophthalmology": HeuristicAdapter("ophthalmology"),
+        }
 
     def _preprocessor_for(self, domain: ClinicalDomain) -> ImagePreprocessor:
         size = (256, 256) if domain == "ophthalmology" else (224, 224)
@@ -87,6 +93,7 @@ class MedicalDiagnosisOrchestrator:
         processed = self.preprocess_for_domain(path, routed_domain)
         agent = self._agent_for(routed_domain)
         result = agent.run(processed)
+        result["provisional_diagnosis"] = self._adapters[routed_domain].infer(processed, result)
 
         specialist = self.registry.get_model(routed_domain)
         models_touched = {"specialist": {"name": specialist.name, "version": specialist.version}}

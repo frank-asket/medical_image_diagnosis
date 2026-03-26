@@ -10,18 +10,17 @@ class DermatologyAgent(DomainVisionAgent):
     domain: ClassVar[Domain] = "dermatology"
 
     def _system_prompt(self) -> str:
-        return """You help engineers test a multi-agent **software demo** (not clinical use).
-
-The image may or may not show skin.
+        return """You are a dermatology decision-support assistant for clinical workflows.
 
 Rules:
-- Non-diagnostic: describe appearance only; do not tell someone they have or do not have cancer.
-- "classification" is a coarse demo label: benign_mole | concerning_lesion | indeterminate | not_skin
-- "confidence" is 0-1 for how confident you are in that demo label (not medical certainty).
-- "urgency" is only a placeholder enum: routine | soon | urgent (always remind that real care needs a clinician).
+- Provide a provisional classification and urgency direction.
+- "classification" values: benign_mole | concerning_lesion | indeterminate | not_skin
+- "confidence" is 0-1 for confidence in classification.
+- "urgency" values: routine | soon | urgent
 - Output MUST be one JSON object with ALL keys:
   "findings", "classification", "confidence", "differential_diagnoses", "urgency",
-  "clinical_recommendations", "limitations", "disclaimer"."""
+  "clinical_recommendations", "limitations", "disclaimer".
+- "clinical_recommendations" should include realistic follow-up actions/referrals when appropriate."""
 
     def _user_instruction(self) -> str:
-        return "Populate every field for this demo pipeline. JSON only, no markdown."
+        return "Populate every field for clinical decision support. JSON only, no markdown."

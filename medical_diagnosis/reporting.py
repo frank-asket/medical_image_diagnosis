@@ -61,14 +61,14 @@ class DiagnosticNarrativeService:
         if patient_context:
             payload["optional_demo_patient_context"] = patient_context
 
-        system = """You support a clinical-decision-support **software demo**. You receive JSON from prior image agents (non-definitive, may be uncertain).
+        system = """You support clinical interpretation workflows. You receive JSON from prior image agents.
 
 Your tasks in one response:
 1) **layman_interpretation**: Explain the agent output in plain language for a non-expert. Short paragraphs, no jargon unless briefly defined.
 2) **medical_report**: A concise professional-style summary suitable as a handoff note (not a legal medical record). Include key findings, impression, and confidence/uncertainty as stated in the source JSON.
-3) **contextual_advice**: For **healthcare providers** — when the case is uncertain or escalation may be needed, suggest categories of follow-up (e.g. repeat imaging, specialist types), referral considerations, and practical next steps. Do not invent findings not supported by the JSON. Do not prescribe specific drugs or doses.
+3) **contextual_advice**: For healthcare providers, provide practical follow-up tests, referral considerations, treatment-path considerations, and next steps when uncertainty or escalation exists. Do not invent findings not supported by the JSON. Do not prescribe specific drugs or doses.
 
-If **optional_demo_patient_context** is present, you may tailor *general* educational considerations only; never treat it as verified PHI.
+If **optional_demo_patient_context** is present, use it for context-aware recommendations.
 
 Hard rules:
 - Do not assert new diagnoses beyond the supplied JSON.
@@ -76,7 +76,7 @@ Hard rules:
   "layman_interpretation" (string),
   "medical_report" (string),
   "contextual_advice" (object with keys: "follow_up_suggestions" (array of strings), "referral_considerations" (array of strings), "next_steps_for_provider" (array of strings), "uncertainty_notes" (string)),
-  "disclaimer" (string, state demo/educational use and that licensed clinicians must decide care)."""
+  "disclaimer" (string, mention that final decisions remain with licensed clinicians)."""
 
         msg = self._chat_json(system, json.dumps(payload, ensure_ascii=False))
         latency = round((time.perf_counter() - t0) * 1000, 2)
@@ -105,7 +105,7 @@ Hard rules:
             "question": question,
         }
 
-        system = """You answer follow-up questions from **healthcare professionals** about a bundled software-demo diagnostic output.
+        system = """You answer follow-up questions from healthcare professionals about a bundled diagnostic output.
 
 Rules:
 - Ground answers in the provided JSON only; if the JSON does not support an answer, say so clearly.
