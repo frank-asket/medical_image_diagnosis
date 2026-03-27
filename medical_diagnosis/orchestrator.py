@@ -12,7 +12,18 @@ from medical_diagnosis.agents import (
     OphthalmologyAgent,
     RadiologyAgent,
 )
+from medical_diagnosis.agents.gate import MedicalImageGateAgent
 from medical_diagnosis.adapters import ClinicalDomain, DomainModelAdapter, HeuristicAdapter
+from medical_diagnosis.config import (
+    GUARDRAILS_MEDICAL_BLOCK_MIN_CONFIDENCE,
+    GUARDRAILS_NARRATIVE_MIN_CONFIDENCE,
+)
+from medical_diagnosis.guardrails import (
+    should_block_non_medical_image,
+    specialist_confidence_below_narrative_threshold,
+    suppressed_narrative_placeholder,
+    validate_specialist_output,
+)
 from medical_diagnosis.model_management import ModelRegistry
 from medical_diagnosis.preprocessing import ImagePreprocessor, PreprocessedImage
 from medical_diagnosis.reporting import DiagnosticNarrativeService
@@ -45,6 +56,7 @@ class MedicalDiagnosisOrchestrator:
         self.registry = registry or ModelRegistry()
         self.apply_clahe = apply_clahe
         self._router = DomainRouterAgent(registry=self.registry)
+        self._gate = MedicalImageGateAgent(registry=self.registry)
         self._radiology = RadiologyAgent(registry=self.registry)
         self._dermatology = DermatologyAgent(registry=self.registry)
         self._ophthalmology = OphthalmologyAgent(registry=self.registry)
@@ -67,6 +79,45 @@ class MedicalDiagnosisOrchestrator:
         pre = self._preprocessor_for(domain)
         return pre.process_path(path)
 
+    @staticmethod
+    def _initial_guardrails_state() -> dict[str, Any]:
+        return {
+            "medical_image_assessment": None,
+            "router_validation_errors": None,
+            "gate_validation_errors": None,
+            "specialist_schema_valid": None,
+            "specialist_schema_errors": None,
+            "low_confidence_review_required": False,
+            "narratives_suppressed": False,
+            "narratives_suppressed_reason": None,
+            "pipeline_status": "ok",
+            "blocked_reason": None,
+        }
+
+    def _publish_guardrails(self, state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **state,
+            "thresholds": {
+                "medical_block_min_confidence": GUARDRAILS_MEDICAL_BLOCK_MIN_CONFIDENCE,
+                "narrative_min_confidence": GUARDRAILS_NARRATIVE_MIN_CONFIDENCE,
+            },
+        }
+
+    def _blocked_diagnosis(self, *, blocked_reason: str, detail: str) -> dict[str, Any]:
+        return {
+            "pipeline_blocked": True,
+            "blocked_reason": blocked_reason,
+            "detail": detail,
+            "provisional_diagnosis": {
+                "source": "guardrails",
+                "diagnosis_label": "not_applicable",
+                "confidence": 0.0,
+                "triage_level": "urgent_review",
+                "rationale": detail,
+                "differential_diagnoses": [],
+            },
+        }
+
     def run(
         self,
         image_path: str | Path,
@@ -82,28 +133,156 @@ class MedicalDiagnosisOrchestrator:
         fp = content_fingerprint(raw_bytes)
         logger.info("Diagnosis request fingerprint=%s mode=%s", fp, mode)
 
+        gstate = self._initial_guardrails_state()
+        router_pre = ImagePreprocessor(target_size=(224, 224), apply_clahe=self.apply_clahe).process_path(path)
+
+        models_touched: dict[str, dict[str, str]] = {}
+        routing_info: dict[str, Any]
+        routed_domain: ClinicalDomain
+        route_reason: str
+
         if mode == "auto":
-            router_pre = ImagePreprocessor(target_size=(224, 224), apply_clahe=self.apply_clahe).process_path(path)
-            routed_domain, route_reason = self._router.classify(router_pre)
-            logger.info("Router selected domain=%s reason=%s", routed_domain, redact_for_log(route_reason))
+            rc = self._router.classify(router_pre)
+            r_model = self.registry.get_model("router")
+            models_touched["router"] = {"name": r_model.name, "version": r_model.version}
+            routed_domain = rc.domain
+            route_reason = rc.reason
+
+            if rc.validation_errors:
+                gstate["router_validation_errors"] = rc.validation_errors
+                gstate["pipeline_status"] = "blocked"
+                gstate["blocked_reason"] = "router_output_schema_validation_failed"
+                logger.warning("Router output failed schema validation: %s", rc.validation_errors)
+                routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
+                return self._finish_blocked_run(
+                    routing_info=routing_info,
+                    router_pre=router_pre,
+                    guardrails_state=gstate,
+                    models_touched=models_touched,
+                    diagnosis=self._blocked_diagnosis(
+                        blocked_reason=gstate["blocked_reason"],
+                        detail="Router JSON did not match the expected contract; specialist was not run.",
+                    ),
+                )
+
+            assessment = rc.raw.get("medical_image_assessment")
+            if isinstance(assessment, dict):
+                gstate["medical_image_assessment"] = assessment
+
+            block, nb_reason = should_block_non_medical_image(assessment if isinstance(assessment, dict) else {})
+            if block:
+                gstate["pipeline_status"] = "blocked"
+                gstate["blocked_reason"] = nb_reason
+                logger.info(
+                    "Pipeline blocked by medical image gate fingerprint=%s reason=%s",
+                    fp,
+                    nb_reason,
+                )
+                routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
+                return self._finish_blocked_run(
+                    routing_info=routing_info,
+                    router_pre=router_pre,
+                    guardrails_state=gstate,
+                    models_touched=models_touched,
+                    diagnosis=self._blocked_diagnosis(
+                        blocked_reason=nb_reason,
+                        detail="Image assessment indicated non-clinical or non-medical content.",
+                    ),
+                )
+
+            logger.info(
+                "Router selected domain=%s reason=%s",
+                routed_domain,
+                redact_for_log(route_reason),
+            )
+            routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
         else:
             routed_domain = mode
             route_reason = "user_selected"
+            g_model = self.registry.get_model("image_gate")
+            models_touched["image_gate"] = {"name": g_model.name, "version": g_model.version}
+
+            assessment, gate_errs = self._gate.assess(router_pre)
+            if gate_errs:
+                gstate["gate_validation_errors"] = gate_errs
+                gstate["pipeline_status"] = "blocked"
+                gstate["blocked_reason"] = "image_gate_schema_validation_failed"
+                logger.warning("Image gate output failed schema validation: %s", gate_errs)
+                routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
+                return self._finish_blocked_run(
+                    routing_info=routing_info,
+                    router_pre=router_pre,
+                    guardrails_state=gstate,
+                    models_touched=models_touched,
+                    diagnosis=self._blocked_diagnosis(
+                        blocked_reason=gstate["blocked_reason"],
+                        detail="Image gate JSON did not match the expected contract; specialist was not run.",
+                    ),
+                )
+
+            gstate["medical_image_assessment"] = assessment
+            block, nb_reason = should_block_non_medical_image(assessment)
+            if block:
+                gstate["pipeline_status"] = "blocked"
+                gstate["blocked_reason"] = nb_reason
+                logger.info(
+                    "Pipeline blocked by image gate fingerprint=%s reason=%s",
+                    fp,
+                    nb_reason,
+                )
+                routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
+                return self._finish_blocked_run(
+                    routing_info=routing_info,
+                    router_pre=router_pre,
+                    guardrails_state=gstate,
+                    models_touched=models_touched,
+                    diagnosis=self._blocked_diagnosis(
+                        blocked_reason=nb_reason,
+                        detail="Image assessment indicated non-clinical or non-medical content.",
+                    ),
+                )
+
+            routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
 
         processed = self.preprocess_for_domain(path, routed_domain)
         agent = self._agent_for(routed_domain)
         result = agent.run(processed)
-        result["provisional_diagnosis"] = self._adapters[routed_domain].infer(processed, result)
 
+        spec_errs = validate_specialist_output(routed_domain, result)
+        gstate["specialist_schema_valid"] = len(spec_errs) == 0
+        gstate["specialist_schema_errors"] = spec_errs or None
+
+        if spec_errs:
+            logger.warning("Specialist output failed schema validation: %s", spec_errs)
+            result["provisional_diagnosis"] = {
+                "source": "guardrails_schema_validation_failed",
+                "diagnosis_label": "indeterminate",
+                "confidence": 0.0,
+                "triage_level": "urgent_review",
+                "rationale": "Specialist vision output did not match the expected JSON schema; treat as unreliable.",
+                "differential_diagnoses": [],
+            }
+        else:
+            result["provisional_diagnosis"] = self._adapters[routed_domain].infer(processed, result)
+
+        if spec_errs:
+            gstate["low_confidence_review_required"] = True
+        elif specialist_confidence_below_narrative_threshold(result):
+            gstate["low_confidence_review_required"] = True
+
+        suppress_reason: str | None = None
+        if spec_errs:
+            suppress_reason = "specialist_output_failed_schema_validation"
+        elif specialist_confidence_below_narrative_threshold(result):
+            suppress_reason = "specialist_confidence_below_narrative_threshold"
+
+        narrative_block: dict[str, Any] | None = None
         specialist = self.registry.get_model(routed_domain)
-        models_touched = {"specialist": {"name": specialist.name, "version": specialist.version}}
-        if mode == "auto":
-            r = self.registry.get_model("router")
-            models_touched["router"] = {"name": r.name, "version": r.version}
+        models_touched["specialist"] = {"name": specialist.name, "version": specialist.version}
 
-        routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
         out: dict[str, Any] = {
             "routing": routing_info,
+            "guardrails": self._publish_guardrails(gstate),
             "preprocessing": {
                 "width": processed.width,
                 "height": processed.height,
@@ -118,35 +297,76 @@ class MedicalDiagnosisOrchestrator:
             "diagnosis": result,
         }
 
-        narrative_block: dict[str, Any] | None = None
         if with_narratives:
-            narrative_block = self._narratives.generate_narratives(
-                routing=routing_info,
-                diagnosis=result,
-                patient_context=patient_context,
-            )
-            out["results_interpretation"] = {
-                "layman_interpretation": narrative_block.get("layman_interpretation", ""),
-                "disclaimer": narrative_block.get("disclaimer", ""),
-            }
-            out["medical_report"] = {"report_body": narrative_block.get("medical_report", "")}
-            out["contextual_advice"] = narrative_block.get("contextual_advice", {})
-            rep = self.registry.get_model("reporting")
-            models_touched["reporting"] = {"name": rep.name, "version": rep.version}
+            if suppress_reason:
+                gstate["narratives_suppressed"] = True
+                gstate["narratives_suppressed_reason"] = suppress_reason
+                narrative_block = suppressed_narrative_placeholder(reason=suppress_reason)
+                out["results_interpretation"] = {
+                    "layman_interpretation": narrative_block.get("layman_interpretation", ""),
+                    "disclaimer": narrative_block.get("disclaimer", ""),
+                }
+                out["medical_report"] = {"report_body": narrative_block.get("medical_report", "")}
+                out["contextual_advice"] = narrative_block.get("contextual_advice", {})
+            else:
+                narrative_block = self._narratives.generate_narratives(
+                    routing=routing_info,
+                    diagnosis=result,
+                    patient_context=patient_context,
+                )
+                out["results_interpretation"] = {
+                    "layman_interpretation": narrative_block.get("layman_interpretation", ""),
+                    "disclaimer": narrative_block.get("disclaimer", ""),
+                }
+                out["medical_report"] = {"report_body": narrative_block.get("medical_report", "")}
+                out["contextual_advice"] = narrative_block.get("contextual_advice", {})
+                rep = self.registry.get_model("reporting")
+                models_touched["reporting"] = {"name": rep.name, "version": rep.version}
 
+        out["guardrails"] = self._publish_guardrails(gstate)
+        qa_allowed = gstate["pipeline_status"] == "ok" and gstate["specialist_schema_valid"] is True
         if clinical_question and clinical_question.strip():
-            qa = self._narratives.answer_clinical_question(
-                routing=routing_info,
-                diagnosis=result,
-                narratives=narrative_block,
-                question=clinical_question.strip(),
-            )
-            out["clinical_qa"] = qa
-            qa_info = self.registry.get_model("clinical_qa")
-            models_touched["clinical_qa"] = {"name": qa_info.name, "version": qa_info.version}
+            if not qa_allowed:
+                logger.info("Clinical Q&A skipped: pipeline guardrails disallow follow-up for this run.")
+            else:
+                qa = self._narratives.answer_clinical_question(
+                    routing=routing_info,
+                    diagnosis=result,
+                    narratives=narrative_block,
+                    question=clinical_question.strip(),
+                )
+                out["clinical_qa"] = qa
+                qa_info = self.registry.get_model("clinical_qa")
+                models_touched["clinical_qa"] = {"name": qa_info.name, "version": qa_info.version}
 
         out["model_management"]["models_touched"] = models_touched
         return out
+
+    def _finish_blocked_run(
+        self,
+        *,
+        routing_info: dict[str, Any],
+        router_pre: PreprocessedImage,
+        guardrails_state: dict[str, Any],
+        models_touched: dict[str, dict[str, str]],
+        diagnosis: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "routing": routing_info,
+            "guardrails": self._publish_guardrails(guardrails_state),
+            "preprocessing": {
+                "width": router_pre.width,
+                "height": router_pre.height,
+                "channels": router_pre.channels,
+                "clahe": self.apply_clahe,
+            },
+            "model_management": {
+                "models_touched": models_touched,
+                "retrain_signal": self.registry.evaluate_retrain_signal(routing_info["domain"]),
+                "registry_health": self.registry.health_snapshot(),
+            },
+            "diagnosis": diagnosis,
+        }
 
     def answer_question(
         self,
@@ -161,6 +381,14 @@ class MedicalDiagnosisOrchestrator:
         diagnosis = prior_run.get("diagnosis")
         if not isinstance(routing, dict) or not isinstance(diagnosis, dict):
             raise ValueError("prior_run must contain 'routing' and 'diagnosis' dicts")
+
+        gr = prior_run.get("guardrails")
+        if isinstance(gr, dict):
+            if gr.get("pipeline_status") == "blocked":
+                raise ValueError("Follow-up Q&A is disabled for blocked pipeline runs.")
+            if gr.get("specialist_schema_valid") is False:
+                raise ValueError("Follow-up Q&A is disabled because specialist output failed validation.")
+
         narratives = None
         if "results_interpretation" in prior_run and "medical_report" in prior_run:
             narratives = {

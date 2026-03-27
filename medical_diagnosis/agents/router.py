@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from medical_diagnosis.agents.base import DomainVisionAgent
+from medical_diagnosis.guardrails import RouterClassification, validate_router_output
 from medical_diagnosis.model_management import Domain
-
-
-Routing = Literal["radiology", "dermatology", "ophthalmology"]
 
 
 class DomainRouterAgent(DomainVisionAgent):
@@ -22,15 +20,35 @@ Pick the best-matching pipeline label:
 - dermatology: skin close-ups, rashes, lesions
 - ophthalmology: fundus / retina-style circular color photos
 
-Output MUST be one JSON object: {"domain": "<radiology|dermatology|ophthalmology>", "reason": "<short string>"}"""
+Also assess whether the image is appropriate **clinical medical imaging** for these pipelines. Reject obvious non-medical content (selfies, unrelated photos) when confidence is high.
+
+Output MUST be one JSON object with ALL keys:
+{
+  "domain": "<radiology|dermatology|ophthalmology>",
+  "reason": "<short string>",
+  "medical_image_assessment": {
+    "is_clinical_medical_image": <true|false>,
+    "confidence": <number 0 to 1>,
+    "category_hint": "<radiology_style|dermatology_style|ophthalmology_style|non_medical|unclear>",
+    "brief_reason": "<short string>"
+  }
+}"""
 
     def _user_instruction(self) -> str:
-        return "Classify this image for routing. JSON only."
+        return "Classify this image for routing and medical suitability. JSON only."
 
-    def classify(self, image) -> tuple[Routing, str]:
+    def classify(self, image) -> RouterClassification:
         result = self.run(image)
+        errs = validate_router_output(result)
         dom = result.get("domain", "radiology")
-        reason = result.get("reason", "")
         if dom not in ("radiology", "dermatology", "ophthalmology"):
             dom = "radiology"
-        return dom, reason  # type: ignore[return-value]
+        reason = result.get("reason", "")
+        if not isinstance(reason, str):
+            reason = ""
+        return RouterClassification(
+            domain=dom,  # type: ignore[arg-type]
+            reason=reason,
+            raw=result,
+            validation_errors=errs,
+        )

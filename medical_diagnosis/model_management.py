@@ -11,6 +11,7 @@ Domain = Literal[
     "dermatology",
     "ophthalmology",
     "router",
+    "image_gate",
     "reporting",
     "clinical_qa",
 ]
@@ -53,9 +54,15 @@ class ModelRegistry:
             ),
             "router": ModelInfo(
                 name="domain-router",
-                version="1.0.0",
+                version="1.1.0",
                 backend="openai-chat-vision",
                 description="Routes images to radiology / dermatology / ophthalmology pipeline",
+            ),
+            "image_gate": ModelInfo(
+                name="medical-image-gate",
+                version="1.0.0",
+                backend="openai-chat-vision",
+                description="Rejects obvious non-medical images before specialist vision when domain is user-selected",
             ),
             "reporting": ModelInfo(
                 name="diagnostic-narrative",
