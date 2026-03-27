@@ -64,3 +64,17 @@ async def qa(bundle_id: str = Form(...), question: str = Form(...)) -> dict[str,
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"bundle_id": bundle_id, "clinical_qa": answer}
+
+
+@app.post("/api/voice")
+async def voice(bundle_id: str = Form(...), question: str = Form(...)) -> dict[str, Any]:
+    if not question.strip():
+        raise HTTPException(status_code=400, detail="Question is required")
+    prior = _bundles.get(bundle_id)
+    if prior is None:
+        raise HTTPException(status_code=404, detail="Unknown bundle_id. Upload and diagnose first.")
+    try:
+        answer = orchestrator.answer_question(prior, question.strip())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"bundle_id": bundle_id, "clinical_qa": answer}

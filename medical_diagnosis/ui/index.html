@@ -26,6 +26,34 @@
     .empty { color: #666; font-style: italic; }
     details.tech { margin-top: 12px; font-size: 14px; }
     details.tech summary { cursor: pointer; color: #1f6feb; }
+    .voice-controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .btn-secondary {
+      background: #24292f;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn-secondary:hover {
+      background: #000;
+    }
+
+    .recording {
+      background: #cf222e !important;
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.7; }
+      100% { opacity: 1; }
+    }
   </style>
 </head>
 <body>
@@ -71,6 +99,12 @@
         <label for="question">Question</label>
         <textarea id="question" rows="4" placeholder="Ask a follow-up question..." required></textarea>
         <button type="submit">Ask Question</button>
+
+        <div class="voice-controls">
+          <button type="button" id="voice-btn" class="btn-secondary">
+            <span id="mic-icon">🎤</span> <span id="mic-text">Ask with Voice</span>
+          </button>
+        </div>
       </form>
       <div id="qa-status" class="muted"></div>
       <div id="qa-readable" class="report" aria-live="polite"></div>
@@ -316,6 +350,99 @@
         qaStatus.textContent = "Error: " + err.message;
         clearEl(qaReadable);
         qaRaw.textContent = "{}";
+      }
+    });
+
+
+    let mediaRecorder;
+    let audioChunks = [];
+    let startTime;
+    let timerInterval;
+
+    const recordBtn = document.getElementById("voice-btn");
+    const micText = document.getElementById("mic-text");
+    const recordingTime = document.getElementById("recording-time");
+
+    recordBtn.addEventListener("click", async () => {
+      if (!mediaRecorder || mediaRecorder.state === "inactive") {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaRecorder = new MediaRecorder(stream);
+          audioChunks = [];
+
+          mediaRecorder.ondataavailable = (event) => {
+            audioChunks.push(event.data);
+          };
+
+          mediaRecorder.onstop = () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            recordBtn.audioBlob = audioBlob; 
+            micText.textContent = "Audio Captured (Ready)";
+            recordBtn.classList.remove("recording");
+          };
+
+          mediaRecorder.start();
+          startTimer();
+          recordBtn.classList.add("recording");
+          micText.textContent = "Stop Recording";
+        } catch (err) {
+          qaStatus.textContent = "Microphone access denied: " + err.message;
+        }
+      } else {
+        mediaRecorder.stop();
+        stopTimer();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop()); 
+      }
+    });
+
+    function startTimer() {
+      startTime = Date.now();
+      recordingTime.style.display = "block";
+      timerInterval = setInterval(() => {
+        const seconds = Math.floor((Date.now() - startTime) / 1000);
+        recordingTime.textContent = `Recording: ${seconds}s`;
+      }, 1000);
+    }
+
+    function stopTimer() {
+      clearInterval(timerInterval);
+    }
+
+    // UPDATE THE QA SUBMIT HANDLER
+    qaForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!currentBundleId) {
+        qaStatus.textContent = "Run a diagnosis first.";
+        return;
+      }
+
+      const questionText = document.getElementById("question").value.trim();
+      const audioBlob = recordBtn.audioBlob;
+
+      if (!questionText && !audioBlob) {
+        qaStatus.textContent = "Please provide a text question or a voice recording.";
+        return;
+      }
+
+      qaStatus.textContent = "Uploading to expert assistant...";
+      const formData = new FormData();
+      formData.append("bundle_id", currentBundleId);
+      
+      if (questionText) formData.append("question", questionText);
+      if (audioBlob) formData.append("audio_file", audioBlob, "query.webm");
+
+      try {
+        const response = await fetch("/api/qa", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Q&A failed");
+        
+        renderQaReadable(data.clinical_qa);
+        qaStatus.textContent = "Answer received.";
+        // Reset audio after successful send
+        recordBtn.audioBlob = null;
+        micText.textContent = "Start Recording";
+      } catch (err) {
+        qaStatus.textContent = "Error: " + err.message;
       }
     });
   </script>
