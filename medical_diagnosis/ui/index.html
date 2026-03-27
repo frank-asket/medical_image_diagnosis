@@ -26,6 +26,12 @@
     .empty { color: #666; font-style: italic; }
     details.tech { margin-top: 12px; font-size: 14px; }
     details.tech summary { cursor: pointer; color: #1f6feb; }
+    .input-with-voice { position: relative; }
+    .voice-btn { position: absolute; right: 8px; bottom: 20px; width: 36px; height: 36px; padding: 0; font-size: 18px; border-radius: 50%; background: #f0f0f0; color: #333; border: 1px solid #ccc; cursor: pointer; z-index: 10; }
+    .voice-btn:hover { background: #e0e0e0; }
+    .voice-btn.recording { background: #dc3545; color: #fff; animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+    .voice-status { font-size: 13px; color: #666; margin-top: 4px; min-height: 18px; }
   </style>
 </head>
 <body>
@@ -47,7 +53,11 @@
       </select>
 
       <label for="patient-context">Patient Context (optional)</label>
-      <textarea id="patient-context" name="patient_context" rows="3" placeholder="Optional context for recommendations"></textarea>
+      <div class="input-with-voice">
+        <textarea id="patient-context" name="patient_context" rows="3" placeholder="Optional context for recommendations"></textarea>
+        <button type="button" class="voice-btn" id="voice-btn-context" title="Voice input">🎤</button>
+      </div>
+      <div id="voice-status-context" class="voice-status"></div>
 
       <button type="submit">Run Diagnosis</button>
     </form>
@@ -69,7 +79,11 @@
       <h2>3) Expert Q&amp;A</h2>
       <form id="qa-form">
         <label for="question">Question</label>
-        <textarea id="question" rows="4" placeholder="Ask a follow-up question..." required></textarea>
+        <div class="input-with-voice">
+          <textarea id="question" rows="4" placeholder="Ask a follow-up question..." required></textarea>
+          <button type="button" class="voice-btn" id="voice-btn-question" title="Voice input">🎤</button>
+        </div>
+        <div id="voice-status-question" class="voice-status"></div>
         <button type="submit">Ask Question</button>
       </form>
       <div id="qa-status" class="muted"></div>
@@ -318,6 +332,116 @@
         qaRaw.textContent = "{}";
       }
     });
+
+    // Voice input functionality
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      // Hide voice buttons if not supported
+      document.getElementById("voice-btn-context").style.display = "none";
+      document.getElementById("voice-btn-question").style.display = "none";
+      console.warn("Speech Recognition not supported in this browser");
+    } else {
+      // Setup voice input for both textareas
+      setupVoiceInput("voice-btn-context", "patient-context", "voice-status-context");
+      setupVoiceInput("voice-btn-question", "question", "voice-status-question");
+    }
+
+    function setupVoiceInput(buttonId, textareaId, statusId) {
+      const button = document.getElementById(buttonId);
+      const textarea = document.getElementById(textareaId);
+      const status = document.getElementById(statusId);
+      let recognition = null;
+      let isRecording = false;
+
+      button.addEventListener("click", () => {
+        if (isRecording) {
+          stopRecording();
+        } else {
+          startRecording();
+        }
+      });
+
+      function startRecording() {
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = "en-US";
+
+        let finalTranscript = "";
+        let interimTranscript = "";
+
+        recognition.onstart = () => {
+          isRecording = true;
+          button.classList.add("recording");
+          status.textContent = "Listening... (click to stop)";
+        };
+
+        recognition.onresult = (event) => {
+          interimTranscript = "";
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript + " ";
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+          // Show interim results
+          if (interimTranscript) {
+            status.textContent = "Hearing: " + interimTranscript;
+          }
+        };
+
+        recognition.onerror = (event) => {
+          console.error("Speech recognition error:", event.error);
+          if (event.error === "not-allowed" || event.error === "permission-denied") {
+            status.textContent = "Microphone permission denied";
+          } else if (event.error === "no-speech") {
+            status.textContent = "No speech detected. Try again.";
+          } else {
+            status.textContent = "Error: " + event.error;
+          }
+          stopRecording();
+        };
+
+        recognition.onend = () => {
+          if (finalTranscript) {
+            // Append to existing text
+            const currentText = textarea.value;
+            const separator = currentText && !currentText.endsWith(" ") ? " " : "";
+            textarea.value = currentText + separator + finalTranscript.trim();
+            status.textContent = "Voice input complete";
+          } else {
+            status.textContent = "";
+          }
+          isRecording = false;
+          button.classList.remove("recording");
+
+          // Clear status after 3 seconds
+          setTimeout(() => {
+            if (status.textContent !== "Listening... (click to stop)") {
+              status.textContent = "";
+            }
+          }, 3000);
+        };
+
+        try {
+          recognition.start();
+        } catch (err) {
+          console.error("Failed to start recognition:", err);
+          status.textContent = "Failed to start voice input";
+          isRecording = false;
+          button.classList.remove("recording");
+        }
+      }
+
+      function stopRecording() {
+        if (recognition) {
+          recognition.stop();
+        }
+      }
+    }
   </script>
 </body>
 </html>
