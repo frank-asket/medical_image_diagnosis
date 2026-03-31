@@ -5,16 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Medical Image Diagnosis UI</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #f7f8fa; color: #111; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif; margin: 24px; background: #f7f8fa; color: #111; line-height: 1.45; }
     .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     h1 { margin-top: 0; }
+    h2 { font-size: 1.1rem; margin: 0 0 12px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+    h3 { font-size: 0.95rem; margin: 16px 0 8px; color: #333; }
     label { display: block; margin-bottom: 8px; font-weight: 600; }
     input, select, textarea, button { width: 100%; margin-bottom: 12px; padding: 8px; box-sizing: border-box; }
-    button { cursor: pointer; background: #1f6feb; color: #fff; border: none; border-radius: 6px; }
+    button { cursor: pointer; background: #1f6feb; color: #fff; border: none; border-radius: 6px; padding: 10px; }
     button:hover { background: #195ecb; }
-    pre { background: #0d1117; color: #d2e0ff; padding: 12px; border-radius: 6px; overflow-x: auto; max-height: 420px; }
+    pre { background: #0d1117; color: #d2e0ff; padding: 12px; border-radius: 6px; overflow-x: auto; max-height: 360px; font-size: 0.8rem; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
     .muted { color: #555; font-size: 14px; }
+    .prose { white-space: pre-wrap; margin: 0 0 12px; }
+    .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .pill { display: inline-block; background: #eef2ff; color: #3730a3; padding: 4px 10px; border-radius: 999px; font-size: 13px; }
+    .pill-strong { background: #1f6feb; color: #fff; }
+    .list { margin: 0 0 12px; padding-left: 1.25rem; }
+    .list li { margin-bottom: 4px; }
+    details { margin-top: 16px; border-top: 1px solid #eee; padding-top: 12px; }
+    summary { cursor: pointer; font-weight: 600; color: #444; margin-bottom: 8px; }
+    .hidden { display: none !important; }
+    .qa-block { margin-top: 12px; padding: 12px; background: #f6f8fa; border-radius: 6px; border: 1px solid #e5e8eb; }
   </style>
 </head>
 <body>
@@ -46,17 +59,26 @@
   <div class="row">
     <div class="card">
       <h2>2) Diagnosis Results</h2>
-      <pre id="results">{}</pre>
+      <p id="results-placeholder" class="muted">Run a diagnosis to see a structured summary here. Full JSON stays available below for debugging.</p>
+      <div id="results-structured" class="hidden"></div>
+      <details id="results-json-details" class="hidden">
+        <summary>Full JSON (technical)</summary>
+        <pre id="results-json"></pre>
+      </details>
     </div>
     <div class="card">
-      <h2>3) Expert Q&A</h2>
+      <h2>3) Expert Q&amp;A</h2>
       <form id="qa-form">
         <label for="question">Question</label>
         <textarea id="question" rows="4" placeholder="Ask a follow-up question..." required></textarea>
         <button type="submit">Ask Question</button>
       </form>
       <div id="qa-status" class="muted"></div>
-      <pre id="qa-result">{}</pre>
+      <div id="qa-structured" class="hidden"></div>
+      <details id="qa-json-details" class="hidden">
+        <summary>Full JSON (technical)</summary>
+        <pre id="qa-result"></pre>
+      </details>
     </div>
   </div>
 
@@ -66,24 +88,174 @@
     const qaForm = document.getElementById("qa-form");
     const diagnoseStatus = document.getElementById("diagnose-status");
     const qaStatus = document.getElementById("qa-status");
-    const resultsPre = document.getElementById("results");
+    const resultsPlaceholder = document.getElementById("results-placeholder");
+    const resultsStructured = document.getElementById("results-structured");
+    const resultsJsonDetails = document.getElementById("results-json-details");
+    const resultsJsonPre = document.getElementById("results-json");
+    const qaStructured = document.getElementById("qa-structured");
+    const qaJsonDetails = document.getElementById("qa-json-details");
     const qaPre = document.getElementById("qa-result");
+
+    function escapeHtml(s) {
+      if (s == null || s === "") return "";
+      const d = document.createElement("div");
+      d.textContent = String(s);
+      return d.innerHTML;
+    }
+
+    function listItems(items) {
+      if (!Array.isArray(items) || items.length === 0) return "";
+      const li = items.map((x) => `<li>${escapeHtml(x)}</li>`).join("");
+      return `<ul class="list">${li}</ul>`;
+    }
+
+    function section(title, innerHtml) {
+      if (!innerHtml) return "";
+      return `<h3>${escapeHtml(title)}</h3>${innerHtml}`;
+    }
+
+    function renderContextualAdvice(obj) {
+      if (!obj || typeof obj !== "object") return "";
+      let html = "";
+      const fu = obj.follow_up_suggestions;
+      const ref = obj.referral_considerations;
+      const ns = obj.next_steps_for_provider;
+      const un = obj.uncertainty_notes;
+      if (fu && fu.length) html += section("Follow-up suggestions", listItems(fu));
+      if (ref && ref.length) html += section("Referral considerations", listItems(ref));
+      if (ns && ns.length) html += section("Next steps for provider", listItems(ns));
+      if (un) html += section("Uncertainty notes", `<p class="prose">${escapeHtml(un)}</p>`);
+      return html;
+    }
+
+    function renderDiagnosisBundle(r) {
+      const routing = r.routing || {};
+      const diagnosis = r.diagnosis || {};
+      const prov = diagnosis.provisional_diagnosis || null;
+
+      const domain = routing.domain || "—";
+      const mode = routing.mode || "—";
+      const reason = routing.reason || "";
+
+      let html = `<div class="meta-row">
+        <span class="pill pill-strong">${escapeHtml(domain)}</span>
+        <span class="pill">mode: ${escapeHtml(mode)}</span>
+      </div>`;
+      if (reason) html += `<p class="muted" style="margin-top:0">Routing: ${escapeHtml(reason)}</p>`;
+
+      if (prov && typeof prov === "object") {
+        const triage = prov.triage_level || "—";
+        const conf = prov.confidence != null ? String(prov.confidence) : "—";
+        html += `<h3>Provisional diagnosis (normalized)</h3>
+          <p><strong>${escapeHtml(prov.diagnosis_label || "—")}</strong>
+          <span class="pill">confidence ${escapeHtml(conf)}</span>
+          <span class="pill">${escapeHtml(triage)}</span></p>`;
+        if (prov.rationale) html += `<p class="prose">${escapeHtml(prov.rationale)}</p>`;
+        const ddx = prov.differential_diagnoses;
+        if (ddx && ddx.length) html += section("Differential diagnoses", listItems(ddx));
+      }
+
+      const interp = r.results_interpretation;
+      if (interp) {
+        if (interp.layman_interpretation) {
+          html += section("Plain-language summary", `<p class="prose">${escapeHtml(interp.layman_interpretation)}</p>`);
+        }
+        if (interp.disclaimer) {
+          html += section("Disclaimer", `<p class="prose muted" style="font-size:13px">${escapeHtml(interp.disclaimer)}</p>`);
+        }
+      }
+
+      const report = r.medical_report;
+      if (report && report.report_body) {
+        html += section("Medical-style report", `<p class="prose">${escapeHtml(report.report_body)}</p>`);
+      }
+
+      const adv = r.contextual_advice;
+      if (adv && typeof adv === "object") {
+        const block = renderContextualAdvice(adv);
+        if (block) html += `<h3>Provider-oriented advice</h3>${block}`;
+      }
+
+      html += `<h3>Specialist agent output</h3>`;
+      const skip = new Set(["provisional_diagnosis", "_agent_meta"]);
+      const lines = [];
+      const primary =
+        diagnosis.primary_impression ||
+        diagnosis.classification ||
+        diagnosis.diagnosis_impression;
+      if (primary) lines.push(`<p><strong>Impression / classification:</strong> ${escapeHtml(primary)}</p>`);
+      if (diagnosis.confidence != null)
+        lines.push(`<p><strong>Stated confidence:</strong> ${escapeHtml(diagnosis.confidence)}</p>`);
+      if (diagnosis.findings) lines.push(`<p class="prose"><strong>Findings:</strong> ${escapeHtml(diagnosis.findings)}</p>`);
+      if (diagnosis.clinical_recommendations)
+        lines.push(`<p class="prose"><strong>Recommendations:</strong> ${escapeHtml(diagnosis.clinical_recommendations)}</p>`);
+      if (diagnosis.limitations) lines.push(`<p class="prose muted"><strong>Limitations:</strong> ${escapeHtml(diagnosis.limitations)}</p>`);
+      const ddx2 = diagnosis.differential_diagnoses;
+      if (ddx2 && ddx2.length && !(prov && Array.isArray(prov.differential_diagnoses))) {
+        lines.push(section("Differentials (specialist)", listItems(ddx2)));
+      }
+      for (const [k, v] of Object.entries(diagnosis)) {
+        if (skip.has(k)) continue;
+        if (
+          [
+            "primary_impression",
+            "classification",
+            "diagnosis_impression",
+            "confidence",
+            "findings",
+            "clinical_recommendations",
+            "limitations",
+            "differential_diagnoses",
+            "disclaimer",
+            "urgency",
+          ].includes(k)
+        )
+          continue;
+        if (typeof v === "object" || Array.isArray(v)) continue;
+        if (v != null && String(v) !== "") lines.push(`<p><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</p>`);
+      }
+      html += lines.join("") || "<p class=\"muted\">No extra specialist fields parsed.</p>";
+
+      return html;
+    }
+
+    function renderClinicalQa(qa) {
+      if (!qa || typeof qa !== "object") return "";
+      let html = `<div class="qa-block">`;
+      if (qa.answer) html += `<h3>Answer</h3><p class="prose">${escapeHtml(qa.answer)}</p>`;
+      if (qa.caveats) html += `<h3>Caveats</h3><p class="prose">${escapeHtml(qa.caveats)}</p>`;
+      const rel = qa.related_topics_to_review;
+      if (rel && rel.length) html += section("Related topics to review", listItems(rel));
+      html += `</div>`;
+      return html;
+    }
 
     diagnoseForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       diagnoseStatus.textContent = "Running diagnosis...";
       qaStatus.textContent = "";
-      qaPre.textContent = "{}";
+      qaStructured.classList.add("hidden");
+      qaStructured.innerHTML = "";
+      qaJsonDetails.classList.add("hidden");
+      qaPre.textContent = "";
       const formData = new FormData(diagnoseForm);
       try {
         const response = await fetch("/api/diagnose", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "Diagnosis failed");
         currentBundleId = data.bundle_id;
-        resultsPre.textContent = JSON.stringify(data.result, null, 2);
+        const result = data.result;
+        resultsPlaceholder.classList.add("hidden");
+        resultsStructured.classList.remove("hidden");
+        resultsStructured.innerHTML = renderDiagnosisBundle(result);
+        resultsJsonDetails.classList.remove("hidden");
+        resultsJsonPre.textContent = JSON.stringify(result, null, 2);
         diagnoseStatus.textContent = "Diagnosis complete. You can now ask follow-up questions.";
       } catch (err) {
         diagnoseStatus.textContent = "Error: " + err.message;
+        resultsPlaceholder.classList.remove("hidden");
+        resultsStructured.classList.add("hidden");
+        resultsJsonDetails.classList.add("hidden");
       }
     });
 
@@ -106,7 +278,11 @@
         const response = await fetch("/api/qa", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "Q&A failed");
-        qaPre.textContent = JSON.stringify(data.clinical_qa, null, 2);
+        const qa = data.clinical_qa;
+        qaStructured.classList.remove("hidden");
+        qaStructured.innerHTML = renderClinicalQa(qa);
+        qaJsonDetails.classList.remove("hidden");
+        qaPre.textContent = JSON.stringify(qa, null, 2);
         qaStatus.textContent = "Answer received.";
       } catch (err) {
         qaStatus.textContent = "Error: " + err.message;
