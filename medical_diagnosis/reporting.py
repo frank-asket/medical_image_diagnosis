@@ -78,7 +78,7 @@ Hard rules:
   "contextual_advice" (object with keys: "follow_up_suggestions" (array of strings), "referral_considerations" (array of strings), "next_steps_for_provider" (array of strings), "uncertainty_notes" (string)),
   "disclaimer" (string, mention that final decisions remain with licensed clinicians)."""
 
-        msg = self._chat_json(system, json.dumps(payload, ensure_ascii=False))
+        msg, usage = self._chat_json(system, json.dumps(payload, ensure_ascii=False))
         latency = round((time.perf_counter() - t0) * 1000, 2)
         self.registry.record_inference("reporting", latency)
         msg["_agent_meta"] = {
@@ -86,6 +86,9 @@ Hard rules:
             "logical_model": self.registry.get_model("reporting").name,
             "openai_model": self.model,
             "latency_ms": latency,
+            "prompt_tokens": usage.prompt_tokens if usage else None,
+            "completion_tokens": usage.completion_tokens if usage else None,
+            "total_tokens": usage.total_tokens if usage else None,
         }
         return msg
 
@@ -115,7 +118,7 @@ Rules:
   "caveats" (string),
   "related_topics_to_review" (array of strings, optional themes for the clinician to explore)."""
 
-        msg = self._chat_json(system, json.dumps(bundle, ensure_ascii=False))
+        msg, usage = self._chat_json(system, json.dumps(bundle, ensure_ascii=False))
         latency = round((time.perf_counter() - t0) * 1000, 2)
         self.registry.record_inference("clinical_qa", latency)
         msg["_agent_meta"] = {
@@ -123,10 +126,13 @@ Rules:
             "logical_model": self.registry.get_model("clinical_qa").name,
             "openai_model": self.model,
             "latency_ms": latency,
+            "prompt_tokens": usage.prompt_tokens if usage else None,
+            "completion_tokens": usage.completion_tokens if usage else None,
+            "total_tokens": usage.total_tokens if usage else None,
         }
         return msg
 
-    def _chat_json(self, system: str, user_content: str) -> dict[str, Any]:
+    def _chat_json(self, system: str, user_content: str) -> tuple[dict[str, Any], Any]:
         resp = self.client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
@@ -143,4 +149,4 @@ Rules:
         raw = m.content
         if not raw or not raw.strip():
             raise RuntimeError("Empty model response for narrative/QA.")
-        return json.loads(_strip_json_fence(raw))
+        return json.loads(_strip_json_fence(raw)), resp.usage

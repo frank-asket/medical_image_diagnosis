@@ -30,10 +30,10 @@ Output MUST be exactly one JSON object:
     def _user_instruction(self) -> str:
         return "Assess this image for clinical suitability. JSON only, no markdown."
 
-    def assess(self, image) -> tuple[dict[str, Any], list[str]]:
+    def assess(self, image) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
         raw = self.run(image)
         inner = raw.get("medical_image_assessment")
         err_source = raw if isinstance(inner, dict) else {"medical_image_assessment": inner}
         errs = validate_gate_output(err_source)
         assessment = inner if isinstance(inner, dict) else {}
-        return assessment, errs
+        return assessment, errs, raw.get("_agent_meta", {})

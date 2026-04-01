@@ -7,3 +7,5 @@ pydicom>=2.4.0
 fastapi>=0.112.0
 uvicorn>=0.30.0
 python-multipart>=0.0.9
+pydantic>=2.0.0
+langfuse>=2.0.0

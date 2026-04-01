@@ -36,3 +36,9 @@ GUARDRAILS_MEDICAL_BLOCK_MIN_CONFIDENCE = _clamp_0_1(
 GUARDRAILS_NARRATIVE_MIN_CONFIDENCE = _clamp_0_1(
     float(os.getenv("GUARDRAILS_NARRATIVE_MIN_CONFIDENCE", "0.55"))
 )
+
+# --- Langfuse observability (optional — see LANGFUSE_INTEGRATION.md) ---
+LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "false").lower() in ("true", "1", "yes")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")

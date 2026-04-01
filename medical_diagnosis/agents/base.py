@@ -80,12 +80,16 @@ class DomainVisionAgent(ABC):
             parsed = json.loads(_strip_json_fence(raw))
         except json.JSONDecodeError as e:
             raise ValueError(f"Model returned non-JSON: {raw[:500]}") from e
+        usage = resp.usage
         parsed["_agent_meta"] = {
             "domain": self.domain,
             "logical_model": info.name,
             "logical_version": info.version,
             "openai_model": self.model,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
+            "prompt_tokens": usage.prompt_tokens if usage else None,
+            "completion_tokens": usage.completion_tokens if usage else None,
+            "total_tokens": usage.total_tokens if usage else None,
         }
         self.registry.record_inference(self.domain, parsed["_agent_meta"]["latency_ms"])
         return parsed

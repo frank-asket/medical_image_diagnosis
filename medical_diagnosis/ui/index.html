@@ -95,8 +95,44 @@
     </div>
   </div>
 
+  <div class="card" id="feedback-card" style="display:none;">
+    <h2>4) Clinician Feedback</h2>
+    <p class="muted">Rate the AI diagnosis so Langfuse tracks quality over time.</p>
+    <form id="feedback-form">
+      <label for="agreement">Agreement with AI diagnosis</label>
+      <select id="agreement" required>
+        <option value="">-- select --</option>
+        <option value="agree">Agree</option>
+        <option value="partially_agree">Partially agree</option>
+        <option value="disagree">Disagree</option>
+      </select>
+
+      <label for="corrected-diagnosis">Corrected diagnosis (optional)</label>
+      <input id="corrected-diagnosis" type="text" maxlength="500" placeholder="e.g. Pneumonia, left lower lobe" />
+
+      <label for="corrected-triage">Corrected triage level (optional)</label>
+      <select id="corrected-triage">
+        <option value="">-- leave unchanged --</option>
+        <option value="routine">Routine</option>
+        <option value="urgent_review">Urgent review</option>
+        <option value="emergent">Emergent</option>
+      </select>
+
+      <label for="confidence-override">Clinician confidence override (optional)</label>
+      <input id="confidence-override" type="range" min="0" max="1" step="0.05" value="" style="padding:4px 0;" />
+      <span id="confidence-value" class="muted" style="font-size:13px;"></span>
+
+      <label for="feedback-comment">Comment (optional, no PHI)</label>
+      <textarea id="feedback-comment" rows="2" maxlength="2000" placeholder="Free-text note for this case"></textarea>
+
+      <button type="submit">Submit Feedback</button>
+    </form>
+    <div id="feedback-status" class="muted"></div>
+  </div>
+
   <script>
     let currentBundleId = null;
+    let currentTraceId = null;
     const diagnoseForm = document.getElementById("diagnose-form");
     const qaForm = document.getElementById("qa-form");
     const diagnoseStatus = document.getElementById("diagnose-status");
@@ -293,9 +329,14 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "Diagnosis failed");
         currentBundleId = data.bundle_id;
+        currentTraceId = data.trace_id || null;
         resultsRaw.textContent = JSON.stringify(data.result, null, 2);
         renderDiagnosisReadable(data.result);
         diagnoseStatus.textContent = "Diagnosis complete. You can now ask follow-up questions.";
+        document.getElementById("feedback-card").style.display = "block";
+        document.getElementById("feedback-status").textContent = "";
+        document.getElementById("feedback-form").reset();
+        document.getElementById("confidence-value").textContent = "";
       } catch (err) {
         diagnoseStatus.textContent = "Error: " + err.message;
         clearEl(resultsReadable);
@@ -330,6 +371,58 @@
         qaStatus.textContent = "Error: " + err.message;
         clearEl(qaReadable);
         qaRaw.textContent = "{}";
+      }
+    });
+
+    // Feedback form
+    const feedbackForm = document.getElementById("feedback-form");
+    const feedbackStatus = document.getElementById("feedback-status");
+    const confidenceSlider = document.getElementById("confidence-override");
+    const confidenceValue = document.getElementById("confidence-value");
+
+    confidenceSlider.addEventListener("input", () => {
+      confidenceValue.textContent = confidenceSlider.value
+        ? Math.round(confidenceSlider.value * 100) + "%"
+        : "";
+    });
+
+    feedbackForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!currentBundleId) {
+        feedbackStatus.textContent = "Run a diagnosis first.";
+        return;
+      }
+      const agreement = document.getElementById("agreement").value;
+      if (!agreement) {
+        feedbackStatus.textContent = "Please select an agreement level.";
+        return;
+      }
+      feedbackStatus.textContent = "Submitting feedback...";
+      const body = { bundle_id: currentBundleId, agreement: agreement };
+      const corrDiag = document.getElementById("corrected-diagnosis").value.trim();
+      if (corrDiag) body.corrected_diagnosis = corrDiag;
+      const corrTriage = document.getElementById("corrected-triage").value;
+      if (corrTriage) body.corrected_triage = corrTriage;
+      const confVal = confidenceSlider.value;
+      if (confVal !== "") body.confidence_override = parseFloat(confVal);
+      const comment = document.getElementById("feedback-comment").value.trim();
+      if (comment) body.comment = comment;
+
+      try {
+        const response = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Feedback submission failed");
+        if (data.feedback_stored) {
+          feedbackStatus.textContent = "Feedback recorded. Thank you!";
+        } else {
+          feedbackStatus.textContent = "Feedback not stored: " + (data.detail || "Langfuse may be disabled.");
+        }
+      } catch (err) {
+        feedbackStatus.textContent = "Error: " + err.message;
       }
     });
 
