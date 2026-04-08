@@ -87,6 +87,8 @@ def safe_diagnosis_output(result: dict[str, Any]) -> dict[str, Any]:
         "triage_level": prov.get("triage_level"),
         "domain": routing.get("domain"),
         "mode": routing.get("mode"),
+        "radiology_subspecialty": routing.get("radiology_subspecialty"),
+        "radiology_subspecialty_source": routing.get("radiology_subspecialty_source"),
     }
 
 

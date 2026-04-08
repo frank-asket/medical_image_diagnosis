@@ -22,7 +22,10 @@ Rules:
   "differential_diagnoses" (array of strings),
   "clinical_recommendations" (string, include concrete next-step suggestions and urgency),
   "limitations" (string),
-  "disclaimer" (string, mention that final decisions remain with licensed clinicians)."""
+  "disclaimer" (string, mention that final decisions remain with licensed clinicians),
+  "imaging_modality" (one of: xr | ct | mri | us | mammo | tomosynthesis | nuclear | pet | angiography | other),
+  "anatomical_region" (one of: chest | abdomen_pelvis | extremity | head_neck | brain | spine | breast | other),
+  "radiology_subspecialty" (must be "general" for this general radiology agent)."""
 
     def _user_instruction(self) -> str:
         return (

@@ -7,11 +7,21 @@ from typing import Any, Literal, Protocol
 
 ClinicalDomain = Literal["radiology", "dermatology", "ophthalmology"]
 
+# User-facing domain is ``ClinicalDomain``. After radiology subspecialty routing, vision adapters
+# may use ``breast_imaging`` or ``neuro_imaging`` instead of ``radiology``.
+SpecialistDomain = Literal[
+    "radiology",
+    "breast_imaging",
+    "neuro_imaging",
+    "dermatology",
+    "ophthalmology",
+]
+
 
 class DomainModelAdapter(Protocol):
     """Contract for plugging in validated domain models later."""
 
-    domain: ClinicalDomain
+    domain: SpecialistDomain
 
     def infer(self, preprocessed_image: Any, llm_result: dict[str, Any]) -> dict[str, Any]:
         """
@@ -32,10 +42,10 @@ class HeuristicAdapter:
     diagnosis contract until calibrated domain models are integrated.
     """
 
-    domain: ClinicalDomain
+    domain: SpecialistDomain
 
     def infer(self, preprocessed_image: Any, llm_result: dict[str, Any]) -> dict[str, Any]:
-        if self.domain == "radiology":
+        if self.domain in ("radiology", "breast_imaging", "neuro_imaging"):
             label = str(llm_result.get("primary_impression", "indeterminate"))
             conf = float(llm_result.get("confidence", 0.0) or 0.0)
             ddx = llm_result.get("differential_diagnoses", []) or []

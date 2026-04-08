@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 Domain = Literal[
     "radiology",
+    "breast_imaging",
+    "neuro_imaging",
     "dermatology",
     "ophthalmology",
     "router",
@@ -36,9 +38,21 @@ class ModelRegistry:
         default_factory=lambda: {
             "radiology": ModelInfo(
                 name="radiology-vision",
+                version="1.1.0",
+                backend="openai-chat-vision",
+                description="General radiology vision (non-breast, non-neuro routing)",
+            ),
+            "breast_imaging": ModelInfo(
+                name="breast-imaging-vision",
                 version="1.0.0",
                 backend="openai-chat-vision",
-                description="GPT-4 class vision for chest X-ray / CT / MRI-style screening assistance",
+                description="Breast imaging vision (mammo, breast US/MRI-style single frames)",
+            ),
+            "neuro_imaging": ModelInfo(
+                name="neuro-imaging-vision",
+                version="1.0.0",
+                backend="openai-chat-vision",
+                description="Neuro imaging vision (brain/spine CT/MRI-style single frames)",
             ),
             "dermatology": ModelInfo(
                 name="dermatology-vision",
@@ -54,9 +68,9 @@ class ModelRegistry:
             ),
             "router": ModelInfo(
                 name="domain-router",
-                version="1.1.0",
+                version="1.2.0",
                 backend="openai-chat-vision",
-                description="Routes images to radiology / dermatology / ophthalmology pipeline",
+                description="Routes images to clinical pipelines; radiology subspecialty for breast/neuro/general",
             ),
             "image_gate": ModelInfo(
                 name="medical-image-gate",

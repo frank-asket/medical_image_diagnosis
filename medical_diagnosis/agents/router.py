@@ -22,6 +22,12 @@ Pick the best-matching pipeline label:
 
 Also assess whether the image is appropriate **clinical medical imaging** for these pipelines. Reject obvious non-medical content (selfies, unrelated photos) when confidence is high.
 
+When "domain" is radiology, you MUST also classify **radiology subspecialty** for routing (single image only):
+- breast: mammography, breast ultrasound, breast MRI, tomosynthesis-style views
+- neuro: brain or spinal CT/MRI (stroke, mass, hemorrhage workup appearance)
+- general: other X-ray/CT/MRI/bone/other body imaging not clearly breast- or neuro-focused
+- unclear: cannot tell from this frame
+
 Output MUST be one JSON object with ALL keys:
 {
   "domain": "<radiology|dermatology|ophthalmology>",
@@ -31,7 +37,15 @@ Output MUST be one JSON object with ALL keys:
     "confidence": <number 0 to 1>,
     "category_hint": "<radiology_style|dermatology_style|ophthalmology_style|non_medical|unclear>",
     "brief_reason": "<short string>"
-  }
+  },
+  "radiology_subspecialty_route": <object or null>. If domain is radiology, use an object; if dermatology or ophthalmology, use null.
+}
+
+When domain is radiology, "radiology_subspecialty_route" MUST be:
+{
+  "subspecialty": "<general|breast|neuro|unclear>",
+  "confidence": <number 0 to 1>,
+  "brief_reason": "<short string>"
 }"""
 
     def _user_instruction(self) -> str:

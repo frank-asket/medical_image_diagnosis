@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from medical_diagnosis.adapters import ClinicalDomain
+from medical_diagnosis.adapters import ClinicalDomain, SpecialistDomain
 from medical_diagnosis.config import (
     GUARDRAILS_MEDICAL_BLOCK_MIN_CONFIDENCE,
     GUARDRAILS_NARRATIVE_MIN_CONFIDENCE,
@@ -37,6 +37,42 @@ DERMATOLOGY_URGENCY = frozenset({"routine", "soon", "urgent"})
 OPHTHALMOLOGY_SEVERITY = frozenset(
     {"none", "mild", "moderate", "severe", "proliferative", "indeterminate", "not_retinal"}
 )
+
+ROUTER_RADIOLOGY_SUBSPECIALTY = frozenset({"general", "breast", "neuro", "unclear"})
+
+RADIOLOGY_MODALITIES = frozenset(
+    {
+        "xr",
+        "ct",
+        "mri",
+        "us",
+        "mammo",
+        "tomosynthesis",
+        "nuclear",
+        "pet",
+        "angiography",
+        "other",
+    }
+)
+
+RADIOLOGY_REGIONS = frozenset(
+    {
+        "breast",
+        "brain",
+        "spine",
+        "chest",
+        "abdomen_pelvis",
+        "head_neck",
+        "extremity",
+        "other",
+    }
+)
+
+RADIOLOGY_OUTPUT_SUBSPECIALTY_BY_AGENT: dict[str, str] = {
+    "radiology": "general",
+    "breast_imaging": "breast",
+    "neuro_imaging": "neuro",
+}
 
 
 def _is_non_empty_str(x: Any) -> bool:
@@ -78,6 +114,23 @@ def validate_medical_image_assessment(obj: Any) -> list[str]:
     return errs
 
 
+def validate_radiology_subspecialty_route_block(obj: Any) -> list[str]:
+    errs: list[str] = []
+    if not isinstance(obj, dict):
+        return ["radiology_subspecialty_route must be an object when domain is radiology"]
+    sub = obj.get("subspecialty")
+    if sub not in ROUTER_RADIOLOGY_SUBSPECIALTY:
+        errs.append(
+            f"radiology_subspecialty_route.subspecialty must be one of {sorted(ROUTER_RADIOLOGY_SUBSPECIALTY)}"
+        )
+    conf = _coerce_float(obj.get("confidence"))
+    if conf is None or not 0.0 <= conf <= 1.0:
+        errs.append("radiology_subspecialty_route.confidence must be a number from 0 to 1")
+    if not _is_non_empty_str(obj.get("brief_reason")):
+        errs.append("radiology_subspecialty_route.brief_reason must be a non-empty string")
+    return errs
+
+
 def validate_router_output(raw: dict[str, Any]) -> list[str]:
     errs: list[str] = []
     dom = raw.get("domain")
@@ -87,6 +140,12 @@ def validate_router_output(raw: dict[str, Any]) -> list[str]:
         errs.append("router.reason must be a non-empty string")
     assessment = raw.get("medical_image_assessment")
     errs.extend([f"router.{e}" for e in validate_medical_image_assessment(assessment)])
+
+    rsr = raw.get("radiology_subspecialty_route")
+    if dom == "radiology":
+        errs.extend([f"router.{e}" for e in validate_radiology_subspecialty_route_block(rsr)])
+    elif rsr is not None:
+        errs.append("router.radiology_subspecialty_route must be null when domain is not radiology")
     return errs
 
 
@@ -119,18 +178,42 @@ def _need_str_list(d: dict[str, Any], key: str, path: str, errs: list[str]) -> N
             break
 
 
-def validate_specialist_output(domain: ClinicalDomain, raw: dict[str, Any]) -> list[str]:
+def _validate_radiology_family(
+    meta_skipped: dict[str, Any],
+    path: str,
+    errs: list[str],
+    *,
+    expected_subspecialty: str,
+) -> None:
+    _need_str_field(meta_skipped, "findings", path, errs)
+    _need_str_field(meta_skipped, "primary_impression", path, errs)
+    _need_number_01(meta_skipped, "confidence", path, errs)
+    _need_str_list(meta_skipped, "differential_diagnoses", path, errs)
+    _need_str_field(meta_skipped, "clinical_recommendations", path, errs)
+    _need_str_field(meta_skipped, "limitations", path, errs)
+    _need_str_field(meta_skipped, "disclaimer", path, errs)
+    mod = meta_skipped.get("imaging_modality")
+    if mod not in RADIOLOGY_MODALITIES:
+        errs.append(
+            f"{path}.imaging_modality must be one of {sorted(RADIOLOGY_MODALITIES)}"
+        )
+    region = meta_skipped.get("anatomical_region")
+    if region not in RADIOLOGY_REGIONS:
+        errs.append(f"{path}.anatomical_region must be one of {sorted(RADIOLOGY_REGIONS)}")
+    sub = meta_skipped.get("radiology_subspecialty")
+    if sub != expected_subspecialty:
+        errs.append(
+            f"{path}.radiology_subspecialty must be '{expected_subspecialty}' for this specialist"
+        )
+
+
+def validate_specialist_output(domain: SpecialistDomain, raw: dict[str, Any]) -> list[str]:
     """Validate specialist JSON (excluding _agent_meta) before adapters and narratives."""
     errs: list[str] = []
     meta_skipped = {k: v for k, v in raw.items() if k != "_agent_meta"}
-    if domain == "radiology":
-        _need_str_field(meta_skipped, "findings", "radiology", errs)
-        _need_str_field(meta_skipped, "primary_impression", "radiology", errs)
-        _need_number_01(meta_skipped, "confidence", "radiology", errs)
-        _need_str_list(meta_skipped, "differential_diagnoses", "radiology", errs)
-        _need_str_field(meta_skipped, "clinical_recommendations", "radiology", errs)
-        _need_str_field(meta_skipped, "limitations", "radiology", errs)
-        _need_str_field(meta_skipped, "disclaimer", "radiology", errs)
+    if domain in RADIOLOGY_OUTPUT_SUBSPECIALTY_BY_AGENT:
+        exp = RADIOLOGY_OUTPUT_SUBSPECIALTY_BY_AGENT[domain]
+        _validate_radiology_family(meta_skipped, domain, errs, expected_subspecialty=exp)
     elif domain == "dermatology":
         _need_str_field(meta_skipped, "findings", "dermatology", errs)
         cls = meta_skipped.get("classification")
@@ -160,6 +243,48 @@ def validate_specialist_output(domain: ClinicalDomain, raw: dict[str, Any]) -> l
         _need_str_field(meta_skipped, "limitations", "ophthalmology", errs)
         _need_str_field(meta_skipped, "disclaimer", "ophthalmology", errs)
     return errs
+
+
+def resolve_radiology_subspecialty(
+    *,
+    routed_domain: ClinicalDomain,
+    mode: str,
+    user_override: str | None,
+    router_raw: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """
+    Pick general | breast | neuro for radiology routing.
+    Returns (resolved_subspecialty, source) where source is user_override | router | default.
+    """
+    if routed_domain != "radiology":
+        return "general", "not_applicable"
+
+    uo = (user_override or "").strip().lower()
+    if uo in ("breast", "neuro", "general"):
+        return uo, "user_override"
+
+    if mode == "auto" and router_raw:
+        block = router_raw.get("radiology_subspecialty_route")
+        if isinstance(block, dict):
+            sub = block.get("subspecialty")
+            if sub == "breast":
+                return "breast", "router"
+            if sub == "neuro":
+                return "neuro", "router"
+            if sub == "general":
+                return "general", "router"
+            if sub == "unclear":
+                return "general", "router_unclear_default"
+
+    return "general", "default"
+
+
+def specialist_domain_for_radiology_subspecialty(resolved: str) -> SpecialistDomain:
+    if resolved == "breast":
+        return "breast_imaging"
+    if resolved == "neuro":
+        return "neuro_imaging"
+    return "radiology"
 
 
 def should_block_non_medical_image(assessment: dict[str, Any]) -> tuple[bool, str]:

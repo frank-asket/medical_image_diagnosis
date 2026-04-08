@@ -49,6 +49,12 @@ def main() -> int:
         metavar="PATH",
         help="Prior JSON output from this tool; use with --ask for follow-up Q&A without re-running vision",
     )
+    parser.add_argument(
+        "--radiology-subspecialty",
+        choices=("general", "breast", "neuro"),
+        default=None,
+        help="When domain is radiology or auto, force breast vs neuro vs general imaging specialist (default: infer)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -89,6 +95,7 @@ def main() -> int:
             with_narratives=not args.no_narratives,
             patient_context=args.patient_context,
             clinical_question=args.ask,
+            radiology_subspecialty=args.radiology_subspecialty,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

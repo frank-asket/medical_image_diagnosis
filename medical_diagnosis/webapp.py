@@ -38,9 +38,16 @@ async def diagnose(
     image: UploadFile = File(...),
     domain: str = Form("auto"),
     patient_context: str = Form(""),
+    radiology_subspecialty: str = Form(""),
 ) -> dict[str, Any]:
     if domain not in ("auto", "radiology", "dermatology", "ophthalmology"):
         raise HTTPException(status_code=400, detail="Invalid domain")
+    rs = radiology_subspecialty.strip().lower()
+    rs_kw: str | None = None
+    if rs:
+        if rs not in ("general", "breast", "neuro"):
+            raise HTTPException(status_code=400, detail="Invalid radiology_subspecialty")
+        rs_kw = rs
     suffix = Path(image.filename or "upload.jpg").suffix or ".jpg"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await image.read())
@@ -51,6 +58,7 @@ async def diagnose(
             mode=domain,  # type: ignore[arg-type]
             with_narratives=True,
             patient_context=patient_context.strip() or None,
+            radiology_subspecialty=rs_kw,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

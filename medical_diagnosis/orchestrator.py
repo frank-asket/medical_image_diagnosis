@@ -13,15 +13,24 @@ from medical_diagnosis.agents import (
     OphthalmologyAgent,
     RadiologyAgent,
 )
+from medical_diagnosis.agents.breast_imaging import BreastImagingAgent
+from medical_diagnosis.agents.neuro_imaging import NeuroImagingAgent
 from medical_diagnosis.agents.gate import MedicalImageGateAgent
-from medical_diagnosis.adapters import ClinicalDomain, DomainModelAdapter, HeuristicAdapter
+from medical_diagnosis.adapters import (
+    ClinicalDomain,
+    DomainModelAdapter,
+    HeuristicAdapter,
+    SpecialistDomain,
+)
 from medical_diagnosis.config import (
     GUARDRAILS_MEDICAL_BLOCK_MIN_CONFIDENCE,
     GUARDRAILS_NARRATIVE_MIN_CONFIDENCE,
 )
 from medical_diagnosis.guardrails import (
+    resolve_radiology_subspecialty,
     should_block_non_medical_image,
     specialist_confidence_below_narrative_threshold,
+    specialist_domain_for_radiology_subspecialty,
     suppressed_narrative_placeholder,
     validate_specialist_output,
 )
@@ -49,7 +58,7 @@ class MedicalDiagnosisOrchestrator:
     1. Security / policy checks on the file
     2. Image preprocessing agent (resize, normalize, optional CLAHE)
     3. Optional domain router (GPT-4 vision) when mode is ``auto``
-    4. Domain specialist agent (radiology / dermatology / ophthalmology)
+    4. Domain specialist agent (radiology subspecialty: general / breast / neuro, plus dermatology / ophthalmology)
     5. GPT-4 text layer (optional): lay interpretation, medical report, provider contextual advice
     6. Optional clinical Q&A grounded in the same bundle
     7. Model management bookkeeping
@@ -60,18 +69,22 @@ class MedicalDiagnosisOrchestrator:
         *,
         registry: ModelRegistry | None = None,
         apply_clahe: bool = False,
-        adapters: dict[ClinicalDomain, DomainModelAdapter] | None = None,
+        adapters: dict[SpecialistDomain, DomainModelAdapter] | None = None,
     ) -> None:
         self.registry = registry or ModelRegistry()
         self.apply_clahe = apply_clahe
         self._router = DomainRouterAgent(registry=self.registry)
         self._gate = MedicalImageGateAgent(registry=self.registry)
         self._radiology = RadiologyAgent(registry=self.registry)
+        self._breast_imaging = BreastImagingAgent(registry=self.registry)
+        self._neuro_imaging = NeuroImagingAgent(registry=self.registry)
         self._dermatology = DermatologyAgent(registry=self.registry)
         self._ophthalmology = OphthalmologyAgent(registry=self.registry)
         self._narratives = DiagnosticNarrativeService(registry=self.registry)
-        self._adapters: dict[ClinicalDomain, DomainModelAdapter] = adapters or {
+        self._adapters: dict[SpecialistDomain, DomainModelAdapter] = adapters or {
             "radiology": HeuristicAdapter("radiology"),
+            "breast_imaging": HeuristicAdapter("breast_imaging"),
+            "neuro_imaging": HeuristicAdapter("neuro_imaging"),
             "dermatology": HeuristicAdapter("dermatology"),
             "ophthalmology": HeuristicAdapter("ophthalmology"),
         }
@@ -139,6 +152,7 @@ class MedicalDiagnosisOrchestrator:
         with_narratives: bool = True,
         patient_context: str | None = None,
         clinical_question: str | None = None,
+        radiology_subspecialty: str | None = None,
     ) -> dict[str, Any]:
         path = Path(image_path)
         enforce_image_size(path)
@@ -183,6 +197,7 @@ class MedicalDiagnosisOrchestrator:
                 with_narratives=with_narratives,
                 patient_context=patient_context,
                 clinical_question=clinical_question,
+                radiology_subspecialty=radiology_subspecialty,
             )
             out["_trace_id"] = _obs.trace_id
             out["_session_id"] = session_id
@@ -202,6 +217,7 @@ class MedicalDiagnosisOrchestrator:
         with_narratives: bool,
         patient_context: str | None,
         clinical_question: str | None,
+        radiology_subspecialty: str | None = None,
     ) -> dict[str, Any]:
         """Inner pipeline logic, factored out so the trace always closes."""
         gstate = self._initial_guardrails_state()
@@ -213,6 +229,7 @@ class MedicalDiagnosisOrchestrator:
         routing_info: dict[str, Any]
         routed_domain: ClinicalDomain
         route_reason: str
+        router_raw_snapshot: dict[str, Any] | None = None
 
         # ── Routing / image gate ──────────────────────────────────────
 
@@ -304,6 +321,7 @@ class MedicalDiagnosisOrchestrator:
                 redact_for_log(route_reason),
             )
             routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
+            router_raw_snapshot = rc.raw
         else:
             routed_domain = mode
             route_reason = "user_selected"
@@ -382,29 +400,49 @@ class MedicalDiagnosisOrchestrator:
 
             routing_info = {"mode": mode, "domain": routed_domain, "reason": route_reason}
 
+        # ── Radiology subspecialty (breast / neuro / general) ─────────
+
+        resolved_rs, rs_source = resolve_radiology_subspecialty(
+            routed_domain=routed_domain,
+            mode=mode,
+            user_override=radiology_subspecialty,
+            router_raw=router_raw_snapshot,
+        )
+        specialist_domain: SpecialistDomain
+        if routed_domain == "radiology":
+            specialist_domain = specialist_domain_for_radiology_subspecialty(resolved_rs)
+            routing_info["radiology_subspecialty"] = resolved_rs
+            routing_info["radiology_subspecialty_source"] = rs_source
+        else:
+            specialist_domain = routed_domain
+
         # ── Specialist vision agent ───────────────────────────────────
 
         processed = self.preprocess_for_domain(path, routed_domain)
-        agent = self._agent_for(routed_domain)
+        agent = (
+            self._radiology_variant_agent(resolved_rs)
+            if routed_domain == "radiology"
+            else self._agent_for(routed_domain)
+        )
 
         spec_vision = vision_descriptor(
             fingerprint=fp,
             width=processed.width,
             height=processed.height,
             channels=processed.channels,
-            domain=routed_domain,
+            domain=specialist_domain,
             stage="specialist_preprocess",
         )
         with _obs.span(
             "specialist-analysis",
-            metadata={"domain": routed_domain},
+            metadata={"domain": specialist_domain, "user_clinical_domain": routed_domain},
             input={
                 "vision": spec_vision,
-                "task": f"{routed_domain}_vision_specialist",
+                "task": f"{specialist_domain}_vision_specialist",
             },
         ) as _ss:
             result = agent.run(processed)
-            spec_model = self.registry.get_model(routed_domain)
+            spec_model = self.registry.get_model(specialist_domain)
             spec_out = {
                 "confidence": result.get("confidence"),
                 "model": spec_model.name,
@@ -421,12 +459,12 @@ class MedicalDiagnosisOrchestrator:
                 result.get("_agent_meta", {}),
                 input_summary={
                     "vision": spec_vision,
-                    "task": f"{routed_domain}_vision_specialist",
+                    "task": f"{specialist_domain}_vision_specialist",
                 },
                 output_summary=spec_out,
             )
 
-        spec_errs = validate_specialist_output(routed_domain, result)
+        spec_errs = validate_specialist_output(specialist_domain, result)
         gstate["specialist_schema_valid"] = len(spec_errs) == 0
         gstate["specialist_schema_errors"] = spec_errs or None
 
@@ -445,8 +483,10 @@ class MedicalDiagnosisOrchestrator:
                 "differential_diagnoses": [],
             }
         else:
-            with _obs.span("diagnosis-adapter", metadata={"domain": routed_domain}) as _ad:
-                result["provisional_diagnosis"] = self._adapters[routed_domain].infer(processed, result)
+            with _obs.span("diagnosis-adapter", metadata={"domain": specialist_domain}) as _ad:
+                result["provisional_diagnosis"] = self._adapters[specialist_domain].infer(
+                    processed, result
+                )
                 _ad.update(output={
                     "diagnosis_label": result["provisional_diagnosis"].get("diagnosis_label"),
                     "confidence": result["provisional_diagnosis"].get("confidence"),
@@ -465,7 +505,7 @@ class MedicalDiagnosisOrchestrator:
             suppress_reason = "specialist_confidence_below_narrative_threshold"
 
         narrative_block: dict[str, Any] | None = None
-        specialist = self.registry.get_model(routed_domain)
+        specialist = self.registry.get_model(specialist_domain)
         models_touched["specialist"] = {"name": specialist.name, "version": specialist.version}
 
         out: dict[str, Any] = {
@@ -479,7 +519,7 @@ class MedicalDiagnosisOrchestrator:
             },
             "model_management": {
                 "models_touched": models_touched,
-                "retrain_signal": self.registry.evaluate_retrain_signal(routed_domain),
+                "retrain_signal": self.registry.evaluate_retrain_signal(specialist_domain),
                 "registry_health": self.registry.health_snapshot(),
             },
             "diagnosis": result,
@@ -689,3 +729,10 @@ class MedicalDiagnosisOrchestrator:
         if domain == "dermatology":
             return self._dermatology
         return self._ophthalmology
+
+    def _radiology_variant_agent(self, resolved_subspecialty: str):
+        if resolved_subspecialty == "breast":
+            return self._breast_imaging
+        if resolved_subspecialty == "neuro":
+            return self._neuro_imaging
+        return self._radiology

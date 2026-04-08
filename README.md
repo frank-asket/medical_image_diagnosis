@@ -96,12 +96,24 @@ flowchart TB
 1. **Input** — Image path via CLI or `MedicalDiagnosisOrchestrator.run()`.
 2. **Security** — Enforces max file size; logs content fingerprints instead of raw pixels.
 3. **Preprocessing** — Decode, resize (224×224 for radiology/dermatology, 256×256 for ophthalmology), normalize; prepares base64 for the API.
-4. **Routing** (`--domain auto`) — `DomainRouterAgent` picks radiology, dermatology, or ophthalmology.
-5. **Specialist** — Domain agent returns structured JSON (findings, impression/classification, confidence, recommendations, etc.).
+4. **Routing** (`--domain auto`) — `DomainRouterAgent` picks radiology, dermatology, or ophthalmology. For **radiology**, the router also returns `radiology_subspecialty_route` (`general` \| `breast` \| `neuro` \| `unclear`) so the pipeline can pick the right vision agent.
+5. **Specialist** — Vision agents: general `RadiologyAgent`, `BreastImagingAgent`, `NeuroImagingAgent`, plus dermatology and ophthalmology. Radiology-family outputs share one JSON shape (including `imaging_modality`, `anatomical_region`, `radiology_subspecialty`).
 6. **Adapter** — Default `HeuristicAdapter` maps specialist output to `diagnosis.provisional_diagnosis` (`diagnosis_label`, `confidence`, `triage_level`, `rationale`, `differential_diagnoses`). Replace with real model-backed adapters without changing the orchestrator shape.
 7. **Narratives (optional)** — Lay interpretation, report body, and provider-oriented contextual advice from the same diagnostic bundle.
 8. **Q&A (optional)** — Follow-up questions grounded in the bundle; can also run from a saved JSON (`--bundle` + `--ask`).
 9. **Observability** — `ModelRegistry` tracks logical model metadata, inference counts, and latency per agent type.
+
+### Radiology subspecialty (breast imaging & neuroimaging)
+
+User-facing **`domain`** stays `radiology` \| `dermatology` \| `ophthalmology` \| `auto`. When the case is **radiology**, the orchestrator resolves a subspecialty track:
+
+| Source | Behavior |
+| --- | --- |
+| **Auto routing** | Router’s `radiology_subspecialty_route` chooses `breast`, `neuro`, or `general`; `unclear` falls back to **general**. |
+| **Manual override** | CLI: `--radiology-subspecialty general\|breast\|neuro`. Library: `run(..., radiology_subspecialty="breast")`. Web/API: form field `radiology_subspecialty`. Overrides router hints when set. |
+| **Non-radiology domains** | Subspecialty is ignored; `routing` omits `radiology_subspecialty` fields. |
+
+`routing` in the response includes `radiology_subspecialty` and `radiology_subspecialty_source` (`user_override`, `router`, `router_unclear_default`, or `default`) when the clinical domain is radiology. The model registry records **`radiology`**, **`breast_imaging`**, or **`neuro_imaging`** for the specialist step. This remains **single-frame** demo scope (not full DICOM series workflows).
 
 ## Guardrails
 
@@ -111,7 +123,7 @@ The orchestrator adds a top-level **`guardrails`** object on every `run()` respo
 
 | Stage | What is checked |
 | --- | --- |
-| **Router** (`--domain auto`) | Full router JSON must match the expected shape, including `medical_image_assessment`. |
+| **Router** (`--domain auto`) | Full router JSON must match the expected shape, including `medical_image_assessment` and (when `domain` is radiology) `radiology_subspecialty_route`. |
 | **Image gate** (manual domain) | Same `medical_image_assessment` shape before the specialist runs. |
 | **Non-medical / non-clinical** | If assessment confidence is at least **`GUARDRAILS_MEDICAL_BLOCK_MIN_CONFIDENCE`** and the model marks the image as non-clinical or `category_hint: non_medical`, the pipeline **blocks**: no specialist, no real narratives, stub `diagnosis`. |
 | **Specialist** | Output validated per-domain (required fields, enums, confidence in \[0, 1\]). Invalid JSON → indeterminate `provisional_diagnosis`, placeholder narratives, follow-up Q&A disabled for that bundle. |
